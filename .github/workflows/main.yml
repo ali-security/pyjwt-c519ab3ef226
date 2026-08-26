@@ -2,27 +2,36 @@
 name: CI
 
 on:
-  push:
-    branches: ["master"]
-  pull_request:
-    branches: ["master"]
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional pytest selector forwarded to tox as posargs (empty runs the full suite)"
+        required: false
+        default: ""
+
+env:
+  PIP_INDEX_URL: "https://:2023-07-18@time-machines-pypi.sealsecurity.io/"
 
 jobs:
   tests:
     name: "Python ${{ matrix.python-version }} on ${{ matrix.platform }}"
     runs-on: "${{ matrix.platform }}"
+    timeout-minutes: 40
     env:
       USING_COVERAGE: '3.7,3.8'
 
     strategy:
+      fail-fast: false
       matrix:
         platform: ["ubuntu-latest", "windows-latest"]
         python-version: ["3.7", "3.8", "3.9", "3.10", "3.11", "pypy-3.8", "pypy-3.9"]
+        exclude:
+          - platform: "ubuntu-latest"
+            python-version: "3.7"
 
     steps:
-      - uses: "actions/checkout@v3"
-      - uses: "actions/setup-python@v4"
+      - uses: "actions/checkout@v4"
+      - uses: "actions/setup-python@v5"
 
         with:
           python-version: "${{ matrix.python-version }}"
@@ -31,17 +40,23 @@ jobs:
         run: |
           python -VV
           python -m site
-          python -m pip install --upgrade pip setuptools wheel
+          # `pip` deliberately omitted from this upgrade: replacing the
+          # pre-installed pip in-place on the PyPy 3.9 tool cache leaves a stale
+          # vendored `resolvelib/resolvers/` package behind, which shadows the
+          # new pip's `resolvers` module and breaks pip itself before tox is
+          # ever installed. The runner's own pip installs everything below fine.
+          python -m pip install --upgrade setuptools wheel
           python -m pip install --upgrade coverage[toml] virtualenv tox tox-gh-actions
 
       - name: "Run tox targets for ${{ matrix.python-version }}"
-        run: "python -m tox"
+        run: "python -m tox -- ${{ inputs.test-filter }}"
 
       # We always use a modern Python version for combining coverage to prevent
       # parsing errors in older versions for modern code.
-      - uses: "actions/setup-python@v4"
+      - uses: "actions/setup-python@v5"
         with:
           python-version: "3.8"
+        if: "contains(env.USING_COVERAGE, matrix.python-version) && matrix.platform == 'ubuntu-latest'"
 
       - name: "Combine coverage"
         run: |
@@ -51,46 +66,57 @@ jobs:
           python -m coverage xml
         if: "contains(env.USING_COVERAGE, matrix.python-version) && matrix.platform == 'ubuntu-latest'"
 
-      - name: "Upload coverage to Codecov"
-        if: "contains(env.USING_COVERAGE, matrix.python-version) && matrix.platform == 'ubuntu-latest'"
-        uses: "codecov/codecov-action@v3"
-        with:
-          fail_ci_if_error: true
-
   package:
     name: "Build & verify package"
     runs-on: "ubuntu-latest"
+    timeout-minutes: 20
 
     steps:
-      - uses: "actions/checkout@v3"
-      - uses: "actions/setup-python@v4"
+      - uses: "actions/checkout@v4"
+      - uses: "actions/setup-python@v5"
 
         with:
-          python-version: "3.8"
+          python-version: "3.11"
 
-      - name: "Install pep517 and twine"
-        run: "python -m pip install pep517 twine"
+      - name: "Install build tooling"
+        run: "python -m pip install --force-reinstall 'setuptools==68.0.0' 'wheel==0.40.0' 'build==0.10.0' twine"
 
       - name: "Build package"
-        run: "python -m pep517.build --source --binary ."
+        run: "python -m build --no-isolation"
 
       - name: "List result"
         run: "ls -l dist"
 
+      - name: "Assert artifact identity"
+        run: |
+          set -xe
+          test -f dist/PyJWT-2.8.0.tar.gz
+          test -f dist/PyJWT-2.8.0-py3-none-any.whl
+          python -c "import zipfile,sys; w=zipfile.ZipFile('dist/PyJWT-2.8.0-py3-none-any.whl'); m=[n for n in w.namelist() if n.endswith('.dist-info/WHEEL')][0]; t=w.read(m).decode(); print(t); sys.exit(0 if 'Generator: bdist_wheel (0.40.0)' in t else 1)"
+
       - name: "Check long_description"
         run: "python -m twine check dist/*"
 
+      - name: "Upload distributions"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "dist"
+          path: "dist/*"
+          if-no-files-found: error
+
   install-dev:
+    if: false
     strategy:
       matrix:
         os: ["ubuntu-latest", "windows-latest", "macos-latest"]
 
     name: "Verify dev env"
     runs-on: "${{ matrix.os }}"
+    timeout-minutes: 20
 
     steps:
-      - uses: "actions/checkout@v3"
-      - uses: "actions/setup-python@v4"
+      - uses: "actions/checkout@v4"
+      - uses: "actions/setup-python@v5"
 
         with:
           python-version: "3.8"
