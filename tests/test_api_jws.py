@@ -8,10 +8,11 @@ from jwt.api_jws import PyJWS
 from jwt.exceptions import (
     DecodeError,
     InvalidAlgorithmError,
+    InvalidKeyError,
     InvalidSignatureError,
     InvalidTokenError,
 )
-from jwt.utils import base64url_decode
+from jwt.utils import base64url_decode, base64url_encode
 from jwt.warnings import RemovedInPyjwt3Warning
 
 from .utils import crypto_required, key_path, no_crypto_required
@@ -362,17 +363,15 @@ class TestJWS:
         right_secret = "foo"
         jws_message = jws.encode(payload, right_secret)
 
-        with pytest.raises(DecodeError):
+        with pytest.raises(InvalidKeyError, match="must not be empty"):
             jws.decode(jws_message, algorithms=["HS256"])
 
     def test_verify_signature_with_no_secret(self, jws, payload):
         right_secret = "foo"
         jws_message = jws.encode(payload, right_secret)
 
-        with pytest.raises(DecodeError) as exc:
+        with pytest.raises(InvalidKeyError, match="must not be empty"):
             jws.decode(jws_message, algorithms=["HS256"])
-
-        assert "Signature verification" in str(exc.value)
 
     def test_verify_signature_with_no_algo_header_throws_exception(self, jws, payload):
         example_jws = b"e30.eyJhIjo1fQ.KEh186CjVw_Q8FadjJcaVnE7hO5Z9nHBbU8TgbhHcBY"
@@ -766,13 +765,87 @@ class TestJWS:
         assert "b64" not in msg_header_obj
         assert msg_payload
 
-    def test_decode_detached_content_without_proper_argument(self, jws):
-        example_jws = (
-            "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImI2NCI6ZmFsc2V9"
-            "."
-            ".65yNkX_ZH4A_6pHaTL_eI84OXOHtfl4K0k5UnlXZ8f4"
+    def test_encode_b64_false_auto_adds_b64_to_crit(self, jws, payload):
+        # RFC 7797 Section 3: producers MUST list "b64" in "crit" whenever
+        # "b64" appears in the protected header.
+        secret = "secret"
+        token = jws.encode(payload, secret, algorithm="HS256", is_payload_detached=True)
+
+        msg_header, _, _ = token.split(".")
+        header_obj = json.loads(base64url_decode(msg_header.encode()))
+
+        assert header_obj["b64"] is False
+        assert "b64" in header_obj.get("crit", [])
+
+    def test_encode_b64_false_preserves_existing_crit_entries(self, jws, payload):
+        secret = "secret"
+        # Caller-supplied crit (containing a hypothetical extension that
+        # PyJWT does support) should be preserved alongside the auto-added
+        # "b64" marker.
+        token = jws.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"b64": False, "crit": ["b64"]},
         )
+
+        header_obj = json.loads(base64url_decode(token.split(".")[0].encode()))
+        assert header_obj["crit"] == ["b64"]
+
+    def test_decode_b64_false_rejects_non_empty_payload_segment(self, jws, payload):
+        # RFC 7515 Appendix F detached form: when b64=false, the compact-
+        # serialization payload segment must be empty. PyJWT must reject a
+        # non-empty middle segment without doing any base64-decoding work
+        # on it; that decode used to be the unauthenticated DoS amplifier.
+        secret = "secret"
+        import hashlib as _hashlib
+        import hmac as _hmac
+
+        header_obj = {
+            "typ": "JWT",
+            "alg": "HS256",
+            "b64": False,
+            "crit": ["b64"],
+        }
+        header_b64 = base64url_encode(
+            json.dumps(header_obj, separators=(",", ":")).encode()
+        )
+        # Stuff the middle segment with arbitrary attacker-controlled bytes.
+        # This should be rejected without being base64-decoded.
+        attacker_segment = b"A" * 1024
+        signing_input = b".".join([header_b64, payload])
+        sig = _hmac.new(secret.encode(), signing_input, _hashlib.sha256).digest()
+        token = b".".join(
+            [header_b64, attacker_segment, base64url_encode(sig)]
+        ).decode()
+
+        with pytest.raises(DecodeError, match="Payload segment must be empty"):
+            jws.decode(token, secret, algorithms=["HS256"], detached_payload=payload)
+
+    def test_decode_b64_false_without_crit_b64_is_rejected(self, jws, payload):
+        # Hand-craft a non-compliant token: header has b64=false but no
+        # crit:["b64"]. Per RFC 7797 Section 3, such tokens are malformed and
+        # must be rejected even though PyJWT understands b64.
+        secret = "secret"
+        import hashlib as _hashlib
+        import hmac as _hmac
+
+        header_obj = {"typ": "JWT", "alg": "HS256", "b64": False}
+        header_b64 = base64url_encode(
+            json.dumps(header_obj, separators=(",", ":")).encode()
+        )
+        signing_input = b".".join([header_b64, payload])
+        sig = _hmac.new(secret.encode(), signing_input, _hashlib.sha256).digest()
+        token = b".".join([header_b64, b"", base64url_encode(sig)]).decode()
+
+        with pytest.raises(InvalidTokenError, match="b64.*crit"):
+            jws.decode(token, secret, algorithms=["HS256"], detached_payload=payload)
+
+    def test_decode_detached_content_without_proper_argument(self, jws, payload):
         example_secret = "secret"
+        example_jws = jws.encode(
+            payload, example_secret, algorithm="HS256", is_payload_detached=True
+        )
 
         with pytest.raises(DecodeError) as exc:
             jws.decode(example_jws, example_secret, algorithms=["HS256"])

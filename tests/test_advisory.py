@@ -1,10 +1,15 @@
+import hashlib
+import hmac
+import json
+
 import pytest
 
 import jwt
 from jwt.algorithms import get_default_algorithms
 from jwt.exceptions import InvalidKeyError
+from jwt.utils import base64url_encode
 
-from .utils import crypto_required
+from .utils import crypto_required, key_path
 
 priv_key_bytes = b"""-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIIbBhdo2ah7X32i50GOzrCr4acZTe6BezUdRIixjTAdL
@@ -116,4 +121,30 @@ class TestAdvisory:
                 encoded_bad,
                 ssh_key_bytes,
                 algorithms=algorithm_names,
+            )
+
+    def test_cve_2026_48526_jwk_json_rejected_as_hmac_secret(self):
+        # Algorithm confusion, JWK flavour: the verifier holds the issuer's
+        # public key as a JWK/JWKS JSON document and hands the raw JSON to
+        # jwt.decode(). Because HMACAlgorithm accepted arbitrary bytes as a
+        # secret, an attacker who can read that (public!) document could sign
+        # an HS256 token with the document bytes and have it verify.
+        with open(key_path("jwk_rsa_pub.json")) as keyfile:
+            public_jwk_json = keyfile.read()
+
+        header = base64url_encode(
+            json.dumps({"typ": "JWT", "alg": "HS256"}, separators=(",", ":")).encode()
+        )
+        body = base64url_encode(
+            json.dumps({"test": 1234}, separators=(",", ":")).encode()
+        )
+        signing_input = b".".join([header, body])
+        sig = hmac.new(public_jwk_json.encode(), signing_input, hashlib.sha256).digest()
+        forged = b".".join([signing_input, base64url_encode(sig)]).decode()
+
+        with pytest.raises(InvalidKeyError, match="looks like a JWK"):
+            jwt.decode(
+                forged,
+                public_jwk_json,
+                algorithms=list(get_default_algorithms()),
             )

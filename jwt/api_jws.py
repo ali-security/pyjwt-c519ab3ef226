@@ -140,6 +140,14 @@ class PyJWS:
 
         if is_payload_detached:
             header["b64"] = False
+            # RFC 7797 Section 3: producers MUST list "b64" in "crit" whenever
+            # "b64" appears in the protected header, so b64-unaware verifiers
+            # don't silently treat an unencoded payload as base64-encoded.
+            existing_crit = header.get("crit", [])
+            if not isinstance(existing_crit, list):
+                raise InvalidTokenError("Invalid 'crit' header: must be a list")
+            if "b64" not in existing_crit:
+                header["crit"] = [*existing_crit, "b64"]
         elif "b64" in header:
             # True is the standard value for b64, so no need for it
             del header["b64"]
@@ -212,6 +220,15 @@ class PyJWS:
         self._validate_headers(header)
 
         if header.get("b64", True) is False:
+            # RFC 7797 Section 3: when "b64" is present in the protected
+            # header, it MUST also appear in "crit". A token that sets
+            # b64=false without declaring it critical is malformed.
+            crit = header.get("crit") or []
+            if not isinstance(crit, list) or "b64" not in crit:
+                raise InvalidTokenError(
+                    "The 'b64' header parameter requires 'b64' to be "
+                    "listed in 'crit'."
+                )
             if detached_payload is None:
                 raise DecodeError(
                     'It is required that you pass in a value for the "detached_payload" argument to decode a message having the b64 header set to false.'
@@ -293,10 +310,21 @@ class PyJWS:
         if not isinstance(header, dict):
             raise DecodeError("Invalid header string: must be a json object")
 
-        try:
-            payload = base64url_decode(payload_segment)
-        except (TypeError, binascii.Error) as err:
-            raise DecodeError("Invalid payload padding") from err
+        if header.get("b64", True) is False:
+            # Detached payload form (RFC 7515 Appendix F): the compact-form
+            # payload segment must be empty; the caller supplies the actual
+            # payload via the `detached_payload` argument in decode_complete.
+            # Skipping the base64 decode here removes an unauthenticated work
+            # amplifier, otherwise an attacker can inflate the unused segment
+            # to force CPU + memory cost before the signature is even checked.
+            if payload_segment:
+                raise DecodeError("Payload segment must be empty when 'b64' is false.")
+            payload = b""
+        else:
+            try:
+                payload = base64url_decode(payload_segment)
+            except (TypeError, binascii.Error) as err:
+                raise DecodeError("Invalid payload padding") from err
 
         try:
             signature = base64url_decode(crypto_segment)

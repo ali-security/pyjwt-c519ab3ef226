@@ -108,6 +108,36 @@ class TestAlgorithms:
             with pytest.raises(InvalidKeyError):
                 algo.from_jwk(keyfile.read())
 
+    @pytest.mark.parametrize("empty_key", ["", b""])
+    def test_hmac_prepare_key_rejects_empty_key(self, empty_key):
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+
+        with pytest.raises(InvalidKeyError, match="must not be empty"):
+            algo.prepare_key(empty_key)
+
+    @pytest.mark.parametrize(
+        "jwk_file",
+        [
+            "jwk_rsa_pub.json",
+            "jwk_ec_pub_P-256.json",
+            "jwk_okp_pub_Ed25519.json",
+            "jwk_hmac.json",
+        ],
+    )
+    def test_hmac_prepare_key_rejects_jwk_json(self, jwk_file):
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+
+        with open(key_path(jwk_file)) as keyfile:
+            with pytest.raises(InvalidKeyError, match="looks like a JWK"):
+                algo.prepare_key(keyfile.read())
+
+    def test_hmac_prepare_key_accepts_json_without_kty(self):
+        # JSON that doesn't look like a JWK (no "kty") should not be misclassified.
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+
+        key = algo.prepare_key('{"this": "is just a json-shaped secret"}')
+        assert key == b'{"this": "is just a json-shaped secret"}'
+
     @crypto_required
     def test_rsa_should_parse_pem_public_key(self):
         algo = RSAAlgorithm(RSAAlgorithm.SHA256)
@@ -1129,11 +1159,10 @@ class TestKeyLengthValidation:
         assert msg is not None
         assert "64" in msg
 
-    def test_hmac_empty_key_returns_warning_message(self):
+    def test_hmac_empty_key_rejected_outright(self):
         algo = HMACAlgorithm(HMACAlgorithm.SHA256)
-        key = algo.prepare_key(b"")
-        msg = algo.check_key_length(key)
-        assert msg is not None
+        with pytest.raises(InvalidKeyError, match="must not be empty"):
+            algo.prepare_key(b"")
 
     def test_hmac_exact_minimum_no_warning(self):
         algo = HMACAlgorithm(HMACAlgorithm.SHA256)
@@ -1377,6 +1406,35 @@ class TestKeyLengthValidation:
         pyjwt_enforce = jwt.PyJWT(options={"enforce_minimum_key_length": True})
         with pytest.raises(InvalidKeyError):
             pyjwt_enforce.decode(token, "short", algorithms=["HS256"])
+
+    def test_pyjwt_decode_honors_per_call_enforce_minimum_key_length(self):
+        # Regression: per-call options passed to PyJWT.decode() must be
+        # forwarded to the JWS verification layer. enforce_minimum_key_length
+        # was previously dropped between PyJWT.decode_complete and
+        # PyJWS._verify_signature.
+        import jwt
+
+        adequate_key = "a" * 32
+        token = jwt.encode({"hello": "world"}, adequate_key, algorithm="HS256")
+
+        # Module-level singleton path with per-call enforcement.
+        with pytest.raises(InvalidKeyError, match="below"):
+            jwt.decode(
+                token,
+                "short",
+                algorithms=["HS256"],
+                options={"enforce_minimum_key_length": True},
+            )
+
+        # PyJWT() instance path (instance default off, per-call on).
+        pyjwt = jwt.PyJWT()
+        with pytest.raises(InvalidKeyError, match="below"):
+            pyjwt.decode(
+                token,
+                "short",
+                algorithms=["HS256"],
+                options={"enforce_minimum_key_length": True},
+            )
 
     def test_pyjwt_decode_warns_short_hmac_key(self):
         import jwt
