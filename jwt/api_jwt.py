@@ -39,6 +39,15 @@ class PyJWT:
             "verify_aud": True,
             "verify_iss": True,
             "require": [],
+            "enforce_minimum_key_length": False,
+        }
+
+    def _get_sig_options(self) -> dict[str, Any]:
+        return {
+            "verify_signature": self.options["verify_signature"],
+            "enforce_minimum_key_length": self.options.get(
+                "enforce_minimum_key_length", False
+            ),
         }
 
     def encode(
@@ -77,6 +86,7 @@ class PyJWT:
             headers,
             json_encoder,
             sort_headers=sort_headers,
+            options=self._get_sig_options(),
         )
 
     def _encode_payload(
@@ -124,6 +134,10 @@ class PyJWT:
             )
         options = dict(options or {})  # shallow-copy or initialize an empty dict
         options.setdefault("verify_signature", True)
+        options.setdefault(
+            "enforce_minimum_key_length",
+            self.options.get("enforce_minimum_key_length", False),
+        )
 
         # If the user has set the legacy `verify` argument, and it doesn't match
         # what the relevant `options` entry for the argument is, inform the user

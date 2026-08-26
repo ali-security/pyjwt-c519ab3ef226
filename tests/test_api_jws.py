@@ -796,8 +796,11 @@ class TestJWS:
                 detached_payload=payload,
                 foo="bar",
             )
-        assert len(record) == 1
-        assert "foo" in str(record[0].message)
+        deprecation_warnings = [
+            w for w in record if issubclass(w.category, RemovedInPyjwt3Warning)
+        ]
+        assert len(deprecation_warnings) == 1
+        assert "foo" in str(deprecation_warnings[0].message)
 
     def test_decode_complete_warns_on_unuspported_kwarg(self, jws, payload):
         secret = "secret"
@@ -813,8 +816,11 @@ class TestJWS:
                 detached_payload=payload,
                 foo="bar",
             )
-        assert len(record) == 1
-        assert "foo" in str(record[0].message)
+        deprecation_warnings = [
+            w for w in record if issubclass(w.category, RemovedInPyjwt3Warning)
+        ]
+        assert len(deprecation_warnings) == 1
+        assert "foo" in str(deprecation_warnings[0].message)
 
     def test_decode_rejects_unknown_crit_extension(
         self, jws: PyJWS, payload: bytes
